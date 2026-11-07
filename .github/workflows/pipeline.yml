@@ -1,0 +1,87 @@
+name: Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v7
+
+      - name: Validate HTML
+        id: html_lint
+        run: npx --yes html-validate index.html
+
+      - name: Build Docker image
+        id: build_image
+        if: always() && steps.checkout.outcome == 'success'
+        run: docker build -t mai-ci-cd-lab:test .
+
+      - name: Run test container
+        id: run_container
+        if: always() && steps.build_image.outcome == 'success'
+        run: docker run -d --name mai-ci-cd-test -p 8080:80 mai-ci-cd-lab:test
+
+      - name: Smoke test container
+        if: always() && steps.run_container.outcome == 'success'
+        run: |
+          sleep 2
+          set +e
+          curl --fail --silent http://localhost:8080 | grep -q "nikitaantonovic57633-code"
+          result=$?
+          echo "grep exit code: $result"
+          if [ "$result" -ne 0 ]; then
+            exit "$result"
+          fi
+          echo "OK"
+
+      - name: Stop test container
+        if: always()
+        run: docker rm -f mai-ci-cd-test || true
+
+  release:
+    name: Release
+    needs: ci
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Skip publishing on pull requests
+        if: github.event_name == 'pull_request'
+        run: echo "Publishing is disabled for pull requests."
+
+      - name: Checkout repository
+        if: github.event_name == 'push'
+        uses: actions/checkout@v7
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_USER: ${{ github.actor }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_USER" --password-stdin
+
+      - name: Build and push
+        if: github.event_name == 'push'
+        env:
+          IMAGE_NAME: ghcr.io/${{ github.repository }}
+        run: |
+          IMAGE_NAME=$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')
+          docker build -t "$IMAGE_NAME:latest" .
+          docker push "$IMAGE_NAME:latest"
